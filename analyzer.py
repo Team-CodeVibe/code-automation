@@ -5,11 +5,12 @@ import os
 import openai
 from openai import OpenAI
 client = OpenAI()
-from pinecone import Pinecone
+from pinecone import Pinecone, ServerlessSpec
 import dotenv
 import time
 import traceback
 from pathlib import Path
+import re
 
 dotenv.load_dotenv()
 
@@ -20,36 +21,111 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 
 # Create or connect to an index
-index_name = 'code-embeddings'
+index_name = 'main-code-embeddings'
+pc.create_index(
+    name=index_name,
+    dimension=256, # Replace with your model dimensions
+    metric="cosine", # Replace with your model metric
+    spec=ServerlessSpec(
+        cloud="aws",
+        region="us-east-1"
+    ) 
+)
 index = pc.Index(index_name)
+
+# Add file filtering
+IGNORE_PATTERNS = [
+    '__pycache__',
+    'node_modules',
+    'venv',
+    '.git',
+    'test',
+    '.vscode',
+]
+
+def should_analyze_file(file_path: str) -> bool:
+    """Check if file should be analyzed based on patterns and extensions."""
+    # Skip ignored directories
+    if any(pattern in str(file_path) for pattern in IGNORE_PATTERNS):
+        return False
+    
+    # List of supported file extensions
+    SUPPORTED_EXTENSIONS = {'.py'}
+    
+    return Path(file_path).suffix in SUPPORTED_EXTENSIONS
 
 def get_embedding(text, max_retries=2, retry_delay=10):
     """Fetch embedding for the given text using OpenAI API."""
+    # Truncate and clean text before embedding
+    text = clean_and_truncate_text(text, max_length=1000)  # Limit to 1000 chars
     for attempt in range(max_retries):
         try:
-            # Updated API usage
-            text = text.replace("\n", " ")
-            return client.embeddings.create(input = [text], model="text-embedding-3-small").data[0].embedding
+            return client.embeddings.create(
+                input=[text], 
+                model="text-embedding-3-small",
+                dimensions=256  # Use smaller dimensions for faster processing
+            ).data[0].embedding
         except Exception as e:
             print(f"Unexpected error: {e}", file=sys.stderr)
             raise
+
+def clean_and_truncate_text(text: str, max_length: int = 1000) -> str:  # Reduced from 1000
+    """Clean and truncate text while preserving important information."""
+    # Remove unnecessary whitespace and normalize
+    text = ' '.join(text.split())
+    
+    # Remove common boilerplate
+    patterns_to_remove = [
+        r'import.*\n',
+        r'from.*import.*\n',
+        r'#.*?\n',
+        r'""".*?"""',  # Remove multi-line docstrings
+        r"'''.*?'''",  # Remove multi-line docstrings
+        r'\s+',        # Collapse multiple spaces
+    ]
+    
+    for pattern in patterns_to_remove:
+        text = re.sub(pattern, ' ', text)
+    
+    # Keep only the most relevant part if too long
+    if len(text) > max_length:
+        # Try to find a good breaking point
+        break_point = text.rfind('.', 0, max_length)
+        if break_point == -1:
+            break_point = text.rfind(' ', 0, max_length)
+        if break_point == -1:
+            break_point = max_length
+        text = text[:break_point]
+    
+    return text.strip()
 
 class CodeAnalyzer(ast.NodeVisitor):
     """Analyzes Python code and generates embeddings for its elements."""
     def __init__(self):
         self.elements = []
         self.current_class = None
+        self.batch_size = 20  # Increased from 10 for better throughput
+        self.pending_elements = []
+        self.total_processed = 0
+        self.start_time = time.time()
 
     def analyze_file(self, file_path):
+        if not should_analyze_file(file_path):
+            return
+            
         try:
             with open(file_path, 'r', encoding='utf-8') as file:
                 source_code = file.read()
             tree = ast.parse(source_code)
             self.file_path = str(file_path)
             self.visit(tree)
+            
+            # Process remaining elements
+            if self.pending_elements:
+                self.process_batch()
+                
         except Exception as e:
             print(f"Error analyzing file {file_path}: {e}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
 
     def visit_Module(self, node):
         docstring = ast.get_docstring(node)
@@ -85,48 +161,89 @@ class CodeAnalyzer(ast.NodeVisitor):
     def process_element(self, element_type, content, node, name=None):
         try:
             if not content or not isinstance(content, str):
-                raise ValueError(f"Invalid content for {element_type} at line {getattr(node, 'lineno', 'unknown')}.")
+                return
 
-            # Generate embedding using OpenAI API
-            embedding = get_embedding(content)
-
-            # Create unique ID
-            element_id = f"{self.file_path}:{getattr(node, 'lineno', 'unknown')}:{element_type}:{name or ''}"
-            
             # Ensure name is never null for metadata
             safe_name = name if name is not None else element_type
             
-            # Metadata - ensure all fields have valid values
-            metadata = {
-                'type': element_type,
-                'name': safe_name,
-                'file_path': str(self.file_path),
-                'line_number': str(getattr(node, 'lineno', 'unknown')),
-                'content': content
-            }
-
-            # Upsert to Pinecone
-            index.upsert(
-                vectors=[{
-                    "id": element_id,
-                    "values": embedding,
-                    "metadata": metadata
-                }],
-                namespace="code-analysis"  # Using a more specific namespace
-            )
-
-            # Store element info
-            self.elements.append({
-                'id': element_id,
-                'type': element_type,
-                'name': safe_name,
+            # Create element data
+            element_data = {
+                'id': f"{self.file_path}:{getattr(node, 'lineno', 'unknown')}:{element_type}:{safe_name}",
                 'content': content,
-                'file_path': str(self.file_path),
-                'line_number': str(getattr(node, 'lineno', 'unknown'))
-            })
+                'metadata': {
+                    'type': element_type,
+                    'name': safe_name,
+                    'file_path': str(self.file_path),
+                    'line_number': str(getattr(node, 'lineno', 'unknown')),
+                    'content': content
+                }
+            }
+            
+            self.pending_elements.append(element_data)
+            
+            # Process batch if we've accumulated enough elements
+            if len(self.pending_elements) >= self.batch_size:
+                self.process_batch()
+                
         except Exception as e:
             print(f"Error processing element {name or element_type}: {str(e)}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
+
+    def process_batch(self):
+        """Process a batch of elements together."""
+        if not self.pending_elements:
+            return
+            
+        try:
+            # Clean and prepare contents
+            contents = []
+            valid_elements = []
+            
+            for elem in self.pending_elements:
+                cleaned_content = clean_and_truncate_text(elem['content'])
+                if cleaned_content:  # Only process non-empty content
+                    contents.append(cleaned_content)
+                    valid_elements.append(elem)
+            
+            if not contents:  # Skip if no valid contents
+                self.pending_elements = []
+                return
+                
+            # Generate embeddings in batch
+            embeddings = client.embeddings.create(
+                input=contents,
+                model="text-embedding-3-small",
+                dimensions=256
+            ).data
+            
+            # Prepare vectors for batch upsert
+            vectors = [
+                {
+                    "id": elem['id'],
+                    "values": emb.embedding,
+                    "metadata": elem['metadata']
+                }
+                for elem, emb in zip(valid_elements, embeddings)
+            ]
+            
+            # Batch upsert to Pinecone
+            if vectors:
+                index.upsert(vectors=vectors)
+            
+            # Update progress
+            self.total_processed += len(vectors)
+            elapsed_time = time.time() - self.start_time
+            rate = self.total_processed / elapsed_time
+            print(f"Processed {self.total_processed} elements ({rate:.2f} elements/sec)", file=sys.stderr)
+            
+            # Store elements info
+            self.elements.extend(valid_elements)
+            
+        except Exception as e:
+            print(f"Error processing batch: {str(e)}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+        finally:
+            self.pending_elements = []
 
 def main():
     if len(sys.argv) != 2:
@@ -138,16 +255,22 @@ def main():
 
     # Check if the path is a directory or file
     path = Path(path_input)
-    if path.is_file() and path.suffix == '.py':
-        analyzer.analyze_file(path)
+    if path.is_file():
+        if should_analyze_file(path):
+            analyzer.analyze_file(path)
     elif path.is_dir():
-        python_files = list(path.rglob('*.py'))
-        print(f"Found {len(python_files)} Python files to analyze.", file=sys.stderr)
-        for file_path in python_files:
-            print(f"Analyzing file: {file_path}", file=sys.stderr)
-            analyzer.analyze_file(file_path)
+        # Find all supported files
+        all_files = []
+        for ext in ['.py', '.ts', '.js', '.json', '.md']:
+            all_files.extend(path.rglob(f'*{ext}'))
+        
+        print(f"Found {len(all_files)} files to analyze.", file=sys.stderr)
+        for file_path in all_files:
+            if should_analyze_file(file_path):
+                print(f"Analyzing file: {file_path}", file=sys.stderr)
+                analyzer.analyze_file(file_path)
     else:
-        print(f"The path {path_input} is neither a Python file nor a directory containing Python files.", file=sys.stderr)
+        print(f"The path {path_input} is not a valid file or directory.", file=sys.stderr)
         sys.exit(1)
 
     # Output the elements as JSON

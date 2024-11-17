@@ -76,6 +76,10 @@ function analyzeCodebase(directoryPath: string): Promise<any[]> {
             PINECONE_API_KEY: process.env.PINECONE_API_KEY,
         };
 
+        // Add debug logging
+        console.log("Analyzing directory:", directoryPath);
+        console.log("Using analyzer script:", analyzerScript);
+
         vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
@@ -89,8 +93,8 @@ function analyzeCodebase(directoryPath: string): Promise<any[]> {
                         [analyzerScript, directoryPath],
                         { env },
                         (error, stdout, stderr) => {
-                            console.log("Raw stdout:", stdout);
-                            console.log("Raw stderr:", stderr);
+                            console.log("Python script stdout:", stdout);
+                            console.log("Python script stderr:", stderr);
 
                             if (error) {
                                 console.error("Execution error:", error);
@@ -107,11 +111,18 @@ function analyzeCodebase(directoryPath: string): Promise<any[]> {
                                 const cleanedOutput = stdout.trim();
                                 const analysisResult =
                                     JSON.parse(cleanedOutput);
+                                console.log(
+                                    "Successfully analyzed files:",
+                                    analysisResult.length
+                                );
+                                vscode.window.showInformationMessage(
+                                    `Successfully analyzed ${analysisResult.length} code elements.`
+                                );
                                 resolve(analysisResult);
                             } catch (parseError) {
                                 console.error(
                                     "Failed to parse JSON:",
-                                    stdout.trim()
+                                    parseError
                                 );
                                 reject(
                                     new Error(
@@ -133,7 +144,7 @@ async function generateSummary() {
     try {
         const query = await vscode.window.showInputBox({
             prompt: "Enter your query about the codebase",
-            placeHolder: "e.g., Explain the authentication logic",
+            placeHolder: "e.g., Give a summary of the codebase",
             ignoreFocusOut: true,
         });
 
@@ -141,7 +152,6 @@ async function generateSummary() {
             return;
         }
 
-        // Show progress indicator
         await vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
@@ -149,108 +159,22 @@ async function generateSummary() {
                 cancellable: false,
             },
             async (progress) => {
-                progress.report({ message: "Generating query embedding..." });
-
-                // Generate embedding for the query
-                const embeddingResponse = await fetch(
-                    "https://api.openai.com/v1/embeddings",
-                    {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json",
-                            Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-                        },
-                        body: JSON.stringify({
-                            input: query,
-                            model: "text-embedding-3-small",
-                        }),
-                    }
-                );
-
-                const embeddingData = await embeddingResponse.json();
-                if (embeddingData.error) {
-                    throw new Error(embeddingData.error.message);
-                }
-
                 progress.report({ message: "Searching codebase..." });
 
-                // Perform similarity search in Pinecone
-                const index = pinecone.Index("code-embeddings");
-                const searchResponse = await index.query({
-                    vector: embeddingData.data[0].embedding,
-                    topK: 10,
-                    includeMetadata: true,
-                });
+                // Get semantic search query using GPT
+                const searchQuery = await getSemanticSearchQuery(query);
 
-                const matches = searchResponse.matches || [];
-                if (matches.length === 0) {
-                    vscode.window.showInformationMessage(
-                        "No relevant code found for your query."
+                // Get relevant code elements
+                const matches = await searchCodebase(searchQuery);
+                if (!matches.length) {
+                    vscode.window.showErrorMessage(
+                        "No matches found. Please make sure you've analyzed your codebase first using 'Analyze Codebase' command."
                     );
                     return;
                 }
 
-                // Format the retrieved content
-                const contextContent = matches
-                    .map((match) => {
-                        const metadata = match.metadata as any;
-                        return `
-File: ${metadata.file_path}
-Type: ${metadata.type}
-Name: ${metadata.name}
-Content:
-${metadata.content}
--------------------`;
-                    })
-                    .join("\n\n");
-
-                progress.report({ message: "Generating summary..." });
-
-                // Generate summary using ChatGPT
-                const chatResponse = await fetch(
-                    "https://api.openai.com/v1/chat/completions",
-                    {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json",
-                            Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-                        },
-                        body: JSON.stringify({
-                            model: "gpt-4-turbo-preview",
-                            messages: [
-                                {
-                                    role: "system",
-                                    content:
-                                        "You are a helpful assistant that provides clear, concise summaries of code. Focus on explaining the main functionality and purpose of the code elements.",
-                                },
-                                {
-                                    role: "user",
-                                    content: `Please provide a summary addressing this query: "${query}"\n\nHere are the relevant code elements:\n\n${contextContent}`,
-                                },
-                            ],
-                            temperature: 0.7,
-                            max_tokens: 1000,
-                        }),
-                    }
-                );
-
-                const chatData = await chatResponse.json();
-                if (chatData.error) {
-                    throw new Error(chatData.error.message);
-                }
-
-                const summary = chatData.choices[0].message.content.trim();
-
-                // Create and show the summary document
-                const doc = await vscode.workspace.openTextDocument({
-                    content: `# Code Summary\n\nQuery: ${query}\n\n${summary}\n\n## Referenced Code Elements\n\n${contextContent}`,
-                    language: "markdown",
-                });
-
-                await vscode.window.showTextDocument(doc, {
-                    preview: false,
-                    viewColumn: vscode.ViewColumn.Beside,
-                });
+                // Generate and display summary
+                await generateAndDisplaySummary(query, matches);
             }
         );
     } catch (error) {
@@ -259,6 +183,166 @@ ${metadata.content}
         );
         console.error("Summary generation error:", error);
     }
+}
+
+async function getSemanticSearchQuery(query: string): Promise<string> {
+    const chatResponse = await fetch(
+        "https://api.openai.com/v1/chat/completions",
+        {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+            },
+            body: JSON.stringify({
+                model: "gpt-4-turbo-preview",
+                messages: [
+                    {
+                        role: "system",
+                        content:
+                            "Convert the user's query into a clear, specific search query for generating a summary of the codebase or a specific file user has asked to summarize.",
+                    },
+                    {
+                        role: "user",
+                        content: query,
+                    },
+                ],
+                temperature: 0.3, // Lower temperature for more focused results
+                max_tokens: 100, // Reduced tokens for faster response
+            }),
+        }
+    );
+
+    const chatData = await chatResponse.json();
+    if (chatData.error) {
+        throw new Error(chatData.error.message);
+    }
+
+    return chatData.choices[0].message.content.trim();
+}
+
+async function searchCodebase(searchQuery: string) {
+    // Get embeddings from OpenAI
+    const embeddingResponse = await fetch(
+        "https://api.openai.com/v1/embeddings",
+        {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+            },
+            body: JSON.stringify({
+                input: searchQuery,
+                model: "text-embedding-3-small",
+                dimensions: 256,
+            }),
+        }
+    );
+
+    const embeddingData = await embeddingResponse.json();
+    const vector = embeddingData.data[0].embedding;
+
+    const index = pinecone.Index("main-code-embeddings");
+    const searchResponse = await index.query({
+        vector,
+        topK: 10,
+        includeMetadata: true,
+    });
+
+    return searchResponse.matches || [];
+}
+
+async function generateAndDisplaySummary(query: string, matches: any[]) {
+    // Group matches by file type and structure
+    const groupedMatches = matches.reduce((acc: any, match) => {
+        const metadata = match.metadata as any;
+        const fileExt = path.extname(metadata.file_path);
+        if (!acc[fileExt]) {
+            acc[fileExt] = [];
+        }
+        acc[fileExt].push(match);
+        return acc;
+    }, {});
+
+    // Format the retrieved content with better structure
+    const contextContent = Object.entries(groupedMatches)
+        .map(([fileType, matches]) => {
+            const matchesContent = (matches as any[])
+                .map((match) => {
+                    const metadata = match.metadata as any;
+                    return `
+Type: ${metadata.type.toUpperCase()}
+Name: ${metadata.name}
+File: ${metadata.file_path}
+Content:
+${metadata.content}
+-------------------`;
+                })
+                .join("\n\n");
+            return `## ${fileType.toUpperCase()} Files\n\n${matchesContent}`;
+        })
+        .join("\n\n");
+
+    // Generate summary with better prompting
+    const finalSummaryResponse = await fetch(
+        "https://api.openai.com/v1/chat/completions",
+        {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+            },
+            body: JSON.stringify({
+                model: "gpt-4-turbo-preview",
+                messages: [
+                    {
+                        role: "system",
+                        content: `You are a technical documentation expert. Provide a comprehensive summary of the codebase with the following structure:
+
+1. Project Overview: Brief description of what the project does
+2. Main Components: List and describe the key components/files
+3. Core Functionality: Explain the main features and how they work
+4. Technical Details: Important implementation details, patterns used
+5. Dependencies: List key external dependencies and their purpose
+
+Focus on creating a clear, concise and organized summary that helps developers understand the codebase quickly.`,
+                    },
+                    {
+                        role: "user",
+                        content: `Analyze this codebase and provide a structured summary:\n\n${contextContent}`,
+                    },
+                ],
+                temperature: 0.3,
+                max_tokens: 1500,
+            }),
+        }
+    );
+
+    const finalSummaryData = await finalSummaryResponse.json();
+    if (finalSummaryData.error) {
+        throw new Error(finalSummaryData.error.message);
+    }
+
+    const summary = finalSummaryData.choices[0].message.content.trim();
+
+    // Display results with better formatting
+    const doc = await vscode.workspace.openTextDocument({
+        content: `# Codebase Summary
+
+Query: ${query}
+
+${summary}
+
+## Analyzed Code Elements
+
+${contextContent}`,
+        language: "markdown",
+    });
+
+    await vscode.window.showTextDocument(doc, {
+        preview: false,
+        viewColumn: vscode.ViewColumn.Beside,
+    });
 }
 
 // This method is called when your extension is deactivated
