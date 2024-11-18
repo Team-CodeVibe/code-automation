@@ -11,6 +11,7 @@ import time
 import traceback
 from pathlib import Path
 import re
+import hashlib
 
 dotenv.load_dotenv()
 
@@ -19,19 +20,6 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # Initialize Pinecone
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-
-# Create or connect to an index
-index_name = 'main-code-embeddings'
-pc.create_index(
-    name=index_name,
-    dimension=256, # Replace with your model dimensions
-    metric="cosine", # Replace with your model metric
-    spec=ServerlessSpec(
-        cloud="aws",
-        region="us-east-1"
-    ) 
-)
-index = pc.Index(index_name)
 
 # Add file filtering
 IGNORE_PATTERNS = [
@@ -54,10 +42,47 @@ def should_analyze_file(file_path: str) -> bool:
     
     return Path(file_path).suffix in SUPPORTED_EXTENSIONS
 
+def get_project_hash(directory_path: str) -> str:
+    """Generate a unique hash for the project based on its path and contents."""
+    # Get the absolute path
+    abs_path = os.path.abspath(directory_path)
+    
+    # Create a hash of the project path
+    path_hash = hashlib.md5(abs_path.encode()).hexdigest()[:8]
+    
+    # Create index name with prefix for easy identification
+    return f"code-index-{path_hash}"
+
+def ensure_index_exists(index_name: str, dimension: int = 256) -> None:
+    """Create index if it doesn't exist, otherwise connect to existing one."""
+    try:
+        # List all indexes
+        active_indexes = [index_info['name'] for index_info in pc.list_indexes()]
+        
+        if index_name not in active_indexes:
+            print(f"Creating new index: {index_name}", file=sys.stderr)
+            pc.create_index(
+                name=index_name,
+                dimension=dimension,
+                metric="cosine",
+                spec=ServerlessSpec(
+                    cloud="aws",
+                    region="us-east-1"
+                )
+            )
+            # Wait for index to be ready
+            time.sleep(2)
+        else:
+            print(f"Using existing index: {index_name}", file=sys.stderr)
+            
+    except Exception as e:
+        print(f"Error ensuring index exists: {e}", file=sys.stderr)
+        raise
+
 def get_embedding(text, max_retries=2, retry_delay=10):
     """Fetch embedding for the given text using OpenAI API."""
     # Truncate and clean text before embedding
-    text = clean_and_truncate_text(text, max_length=1000)  # Limit to 1000 chars
+    text = clean_and_truncate_text(text, max_length=500)  # Limit to 500 chars
     for attempt in range(max_retries):
         try:
             return client.embeddings.create(
@@ -69,25 +94,19 @@ def get_embedding(text, max_retries=2, retry_delay=10):
             print(f"Unexpected error: {e}", file=sys.stderr)
             raise
 
-def clean_and_truncate_text(text: str, max_length: int = 1000) -> str:  # Reduced from 1000
+def clean_and_truncate_text(text: str, max_length: int = 500) -> str:
     """Clean and truncate text while preserving important information."""
-    # Remove unnecessary whitespace and normalize
+    # Remove unnecessary whitespace
     text = ' '.join(text.split())
     
-    # Remove common boilerplate
-    patterns_to_remove = [
-        r'import.*\n',
-        r'from.*import.*\n',
-        r'#.*?\n',
-        r'""".*?"""',  # Remove multi-line docstrings
-        r"'''.*?'''",  # Remove multi-line docstrings
-        r'\s+',        # Collapse multiple spaces
-    ]
+    # Remove common boilerplate code patterns
+    text = re.sub(r'import.*\n', '', text)
+    text = re.sub(r'from.*import.*\n', '', text)
     
-    for pattern in patterns_to_remove:
-        text = re.sub(pattern, ' ', text)
+    # Remove comments that don't add value
+    text = re.sub(r'#.*?\n', '\n', text)
     
-    # Keep only the most relevant part if too long
+    # Truncate if still too long, trying to break at meaningful points
     if len(text) > max_length:
         # Try to find a good breaking point
         break_point = text.rfind('.', 0, max_length)
@@ -95,6 +114,7 @@ def clean_and_truncate_text(text: str, max_length: int = 1000) -> str:  # Reduce
             break_point = text.rfind(' ', 0, max_length)
         if break_point == -1:
             break_point = max_length
+            
         text = text[:break_point]
     
     return text.strip()
@@ -104,28 +124,10 @@ class CodeAnalyzer(ast.NodeVisitor):
     def __init__(self):
         self.elements = []
         self.current_class = None
-        self.batch_size = 20  # Increased from 10 for better throughput
+        self.batch_size = 20  # Process embeddings in batches
         self.pending_elements = []
         self.total_processed = 0
         self.start_time = time.time()
-
-    def analyze_file(self, file_path):
-        if not should_analyze_file(file_path):
-            return
-            
-        try:
-            with open(file_path, 'r', encoding='utf-8') as file:
-                source_code = file.read()
-            tree = ast.parse(source_code)
-            self.file_path = str(file_path)
-            self.visit(tree)
-            
-            # Process remaining elements
-            if self.pending_elements:
-                self.process_batch()
-                
-        except Exception as e:
-            print(f"Error analyzing file {file_path}: {e}", file=sys.stderr)
 
     def visit_Module(self, node):
         docstring = ast.get_docstring(node)
@@ -150,13 +152,13 @@ class CodeAnalyzer(ast.NodeVisitor):
 
     def visit_Import(self, node):
         for alias in node.names:
-            self.process_element('import', alias.name, node)
+            self.process_element('import', alias.name, node, alias.name)
 
     def visit_ImportFrom(self, node):
         module = node.module or ''
         for alias in node.names:
             import_name = f"{module}.{alias.name}"
-            self.process_element('import', import_name, node)
+            self.process_element('import', import_name, node, import_name)
 
     def process_element(self, element_type, content, node, name=None):
         try:
@@ -195,21 +197,8 @@ class CodeAnalyzer(ast.NodeVisitor):
             return
             
         try:
-            # Clean and prepare contents
-            contents = []
-            valid_elements = []
-            
-            for elem in self.pending_elements:
-                cleaned_content = clean_and_truncate_text(elem['content'])
-                if cleaned_content:  # Only process non-empty content
-                    contents.append(cleaned_content)
-                    valid_elements.append(elem)
-            
-            if not contents:  # Skip if no valid contents
-                self.pending_elements = []
-                return
-                
-            # Generate embeddings in batch
+            # Generate embeddings for all contents in batch
+            contents = [clean_and_truncate_text(elem['content']) for elem in self.pending_elements]
             embeddings = client.embeddings.create(
                 input=contents,
                 model="text-embedding-3-small",
@@ -217,14 +206,13 @@ class CodeAnalyzer(ast.NodeVisitor):
             ).data
             
             # Prepare vectors for batch upsert
-            vectors = [
-                {
+            vectors = []
+            for elem, embedding_data in zip(self.pending_elements, embeddings):
+                vectors.append({
                     "id": elem['id'],
-                    "values": emb.embedding,
+                    "values": embedding_data.embedding,
                     "metadata": elem['metadata']
-                }
-                for elem, emb in zip(valid_elements, embeddings)
-            ]
+                })
             
             # Batch upsert to Pinecone
             if vectors:
@@ -237,13 +225,33 @@ class CodeAnalyzer(ast.NodeVisitor):
             print(f"Processed {self.total_processed} elements ({rate:.2f} elements/sec)", file=sys.stderr)
             
             # Store elements info
-            self.elements.extend(valid_elements)
+            self.elements.extend(self.pending_elements)
+            
+            # Clear pending elements
+            self.pending_elements = []
             
         except Exception as e:
             print(f"Error processing batch: {str(e)}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
-        finally:
-            self.pending_elements = []
+
+    def analyze_file(self, file_path):
+        if not should_analyze_file(file_path):
+            return
+            
+        try:
+            with open(file_path, 'r', encoding='utf-8') as file:
+                source_code = file.read()
+            tree = ast.parse(source_code)
+            self.file_path = str(file_path)
+            self.visit(tree)
+            
+            # Process any remaining elements
+            if self.pending_elements:
+                self.process_batch()
+                
+        except Exception as e:
+            print(f"Error analyzing file {file_path}: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
 
 def main():
     if len(sys.argv) != 2:
@@ -251,8 +259,19 @@ def main():
         sys.exit(1)
 
     path_input = sys.argv[1]
+    
+    # Generate index name based on project
+    index_name = get_project_hash(path_input)
+    
+    # Ensure index exists
+    ensure_index_exists(index_name)
+    
+    # Get the index
+    global index
+    index = pc.Index(index_name)
+    
     analyzer = CodeAnalyzer()
-
+    
     # Check if the path is a directory or file
     path = Path(path_input)
     if path.is_file():
@@ -261,7 +280,7 @@ def main():
     elif path.is_dir():
         # Find all supported files
         all_files = []
-        for ext in ['.py', '.ts', '.js', '.json', '.md']:
+        for ext in ['.py']:
             all_files.extend(path.rglob(f'*{ext}'))
         
         print(f"Found {len(all_files)} files to analyze.", file=sys.stderr)

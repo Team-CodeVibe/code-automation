@@ -3,6 +3,7 @@ import { execFile } from "child_process";
 import * as path from "path";
 import { Pinecone } from "@pinecone-database/pinecone";
 import * as dotenv from "dotenv";
+import * as crypto from "crypto";
 
 // Load environment variables from .env file
 dotenv.config({ path: path.join(__dirname, "..", ".env") });
@@ -16,7 +17,20 @@ interface RecordMetadata {
     content?: string;
 }
 
-export function activate(context: vscode.ExtensionContext) {
+// Add this function to generate consistent index names
+function getProjectHash(workspacePath: string): string {
+    const hash = crypto
+        .createHash("md5")
+        .update(workspacePath)
+        .digest("hex")
+        .slice(0, 8);
+    return `code-index-${hash}`;
+}
+
+let context: vscode.ExtensionContext;
+
+export function activate(ctx: vscode.ExtensionContext) {
+    context = ctx;
     console.log('Extension "extension" is now active!');
 
     // Initialize Pinecone
@@ -76,7 +90,6 @@ function analyzeCodebase(directoryPath: string): Promise<any[]> {
             PINECONE_API_KEY: process.env.PINECONE_API_KEY,
         };
 
-        // Add debug logging
         console.log("Analyzing directory:", directoryPath);
         console.log("Using analyzer script:", analyzerScript);
 
@@ -92,7 +105,7 @@ function analyzeCodebase(directoryPath: string): Promise<any[]> {
                         pythonExecutable,
                         [analyzerScript, directoryPath],
                         { env },
-                        (error, stdout, stderr) => {
+                        async (error, stdout, stderr) => {
                             console.log("Python script stdout:", stdout);
                             console.log("Python script stderr:", stderr);
 
@@ -111,10 +124,20 @@ function analyzeCodebase(directoryPath: string): Promise<any[]> {
                                 const cleanedOutput = stdout.trim();
                                 const analysisResult =
                                     JSON.parse(cleanedOutput);
+
+                                // Store the index name in workspace state
+                                const indexName = getProjectHash(directoryPath);
+                                await context.workspaceState.update(
+                                    "currentIndexName",
+                                    indexName
+                                );
+
+                                console.log("Using index:", indexName);
                                 console.log(
                                     "Successfully analyzed files:",
                                     analysisResult.length
                                 );
+
                                 vscode.window.showInformationMessage(
                                     `Successfully analyzed ${analysisResult.length} code elements.`
                                 );
@@ -222,6 +245,12 @@ async function getSemanticSearchQuery(query: string): Promise<string> {
 }
 
 async function searchCodebase(searchQuery: string) {
+    // Get the current index name from workspace state
+    const indexName = context.workspaceState.get("currentIndexName") as string;
+    if (!indexName) {
+        throw new Error("No index found. Please analyze the codebase first.");
+    }
+
     // Get embeddings from OpenAI
     const embeddingResponse = await fetch(
         "https://api.openai.com/v1/embeddings",
@@ -242,7 +271,8 @@ async function searchCodebase(searchQuery: string) {
     const embeddingData = await embeddingResponse.json();
     const vector = embeddingData.data[0].embedding;
 
-    const index = pinecone.Index("main-code-embeddings");
+    // Use the dynamic index name
+    const index = pinecone.Index(indexName);
     const searchResponse = await index.query({
         vector,
         topK: 10,
