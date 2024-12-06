@@ -327,15 +327,14 @@ ${metadata.content}
                 messages: [
                     {
                         role: "system",
-                        content: `You are a technical documentation expert. Provide a comprehensive summary of the codebase with the following structure:
+                        content: `You are a technical documentation expert. Provide a detailed and comprehensive summary of the codebase with the following structure:
 
-1. Project Overview: Brief description of what the project does
-2. Main Components: List and describe the key components/files
+1. Project Overview: Detailed description of what the project does
+2. Main Components: List and describe the all the key files components/files in the codebase in detail
 3. Core Functionality: Explain the main features and how they work
 4. Technical Details: Important implementation details, patterns used
-5. Dependencies: List key external dependencies and their purpose
 
-Focus on creating a clear, concise and organized summary that helps developers understand the codebase quickly.`,
+Focus on creating a detailed and organized summary that helps developers who are new to the codebase understand the codebase quickly.`,
                     },
                     {
                         role: "user",
@@ -377,3 +376,4 @@ ${contextContent}`,
 
 // This method is called when your extension is deactivated
 export function deactivate() {}
+// 5. Dependencies: List key external dependencies and their purpose
