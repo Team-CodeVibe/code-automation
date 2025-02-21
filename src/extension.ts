@@ -4,6 +4,7 @@ import * as path from "path";
 import { Pinecone } from "@pinecone-database/pinecone";
 import * as dotenv from "dotenv";
 import * as crypto from "crypto";
+import { CodeChatView } from './CodeChatView';
 
 // Load environment variables from .env file
 dotenv.config({ path: path.join(__dirname, "..", ".env") });
@@ -33,29 +34,47 @@ export function activate(ctx: vscode.ExtensionContext) {
     context = ctx;
     console.log('Extension "extension" is now active!');
 
+    // Register Code Chat View
+    const codeChatView = new CodeChatView(context.extensionUri);
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(
+            CodeChatView.viewType, 
+            codeChatView,
+            {
+                webviewOptions: {
+                    retainContextWhenHidden: true
+                }
+            }
+        )
+    );
+
+    // Automatically show the chat view
+    vscode.commands.executeCommand('workbench.view.extension.code-chat');
+
     // Initialize Pinecone
     // Register the command that invokes the analyzeCodebase function
     const analyzeCommand = vscode.commands.registerCommand(
         "extension.analyzeCodebase",
-        () => {
+        async () => {
             const workspaceFolders = vscode.workspace.workspaceFolders;
             if (workspaceFolders && workspaceFolders.length > 0) {
                 const rootPath = workspaceFolders[0].uri.fsPath;
-                analyzeCodebase(rootPath)
-                    .then((analysisResult) => {
-                        vscode.window.showInformationMessage(
-                            "Codebase analyzed successfully!"
-                        );
-                        console.log("Analysis Result:", analysisResult);
-                    })
-                    .catch((error) => {
-                        vscode.window.showErrorMessage(
-                            `Error analyzing codebase: ${error.message}`
-                        );
-                        console.error("Analysis Error:", error);
-                    });
+                try {
+                    const analysisResult = await analyzeCodebase(rootPath);
+                    vscode.window.showInformationMessage(
+                        "Codebase analyzed successfully!"
+                    );
+                    console.log("Analysis Result:", analysisResult);
+                    return "Codebase analyzed successfully!";
+                } catch (error) {
+                    vscode.window.showErrorMessage(
+                        `Error analyzing codebase: ${error.message}`
+                    );
+                    console.error("Analysis Error:", error);
+                    throw error;
+                }
             } else {
-                vscode.window.showErrorMessage(
+                throw new Error(
                     "No workspace folder is open. Please open a folder to analyze."
                 );
             }
@@ -65,13 +84,17 @@ export function activate(ctx: vscode.ExtensionContext) {
     // Register the command that generates a summary based on user query
     const summaryCommand = vscode.commands.registerCommand(
         "extension.generateSummary",
-        () => {
-            generateSummary().catch((error) => {
+        async (query?: string) => {
+            try {
+                const summary = await generateSummary(query);
+                return summary; // This will be used by the chat interface
+            } catch (error) {
                 vscode.window.showErrorMessage(
                     `Error generating summary: ${error.message}`
                 );
                 console.error("Summary Error:", error);
-            });
+                throw error;
+            }
         }
     );
 
@@ -163,48 +186,37 @@ function analyzeCodebase(directoryPath: string): Promise<any[]> {
     });
 }
 
-async function generateSummary() {
+async function generateSummary(query?: string) {
     try {
-        const query = await vscode.window.showInputBox({
-            prompt: "Enter your query about the codebase",
-            placeHolder: "e.g., Give a summary of the codebase",
-            ignoreFocusOut: true,
-        });
+        // If no query provided, prompt for one
+        if (!query) {
+            query = await vscode.window.showInputBox({
+                prompt: "Enter your query about the codebase",
+                placeHolder: "e.g., Give a summary of the codebase",
+                ignoreFocusOut: true,
+            });
+        }
 
         if (!query) {
             return;
         }
 
-        await vscode.window.withProgress(
-            {
-                location: vscode.ProgressLocation.Notification,
-                title: "Generating Summary",
-                cancellable: false,
-            },
-            async (progress) => {
-                progress.report({ message: "Searching codebase..." });
+        // Get semantic search query using GPT
+        const searchQuery = await getSemanticSearchQuery(query);
 
-                // Get semantic search query using GPT
-                const searchQuery = await getSemanticSearchQuery(query);
+        // Get relevant code elements
+        const matches = await searchCodebase(searchQuery);
+        if (!matches.length) {
+            throw new Error("No matches found. Please make sure you've analyzed your codebase first.");
+        }
 
-                // Get relevant code elements
-                const matches = await searchCodebase(searchQuery);
-                if (!matches.length) {
-                    vscode.window.showErrorMessage(
-                        "No matches found. Please make sure you've analyzed your codebase first using 'Analyze Codebase' command."
-                    );
-                    return;
-                }
-
-                // Generate and display summary
-                await generateAndDisplaySummary(query, matches);
-            }
-        );
+        // Generate and display summary
+        const summary = await generateAndDisplaySummary(query, matches);
+        
+        // Return the summary so it can be displayed in the chat
+        return summary;
     } catch (error) {
-        vscode.window.showErrorMessage(
-            `Error generating summary: ${error.message}`
-        );
-        console.error("Summary generation error:", error);
+        throw error;
     }
 }
 
@@ -354,24 +366,7 @@ Focus on creating a detailed and organized summary that helps developers who are
 
     const summary = finalSummaryData.choices[0].message.content.trim();
 
-    // Display results with better formatting
-    const doc = await vscode.workspace.openTextDocument({
-        content: `# Codebase Summary
-
-Query: ${query}
-
-${summary}
-
-## Analyzed Code Elements
-
-${contextContent}`,
-        language: "markdown",
-    });
-
-    await vscode.window.showTextDocument(doc, {
-        preview: false,
-        viewColumn: vscode.ViewColumn.Beside,
-    });
+    return summary;
 }
 
 // This method is called when your extension is deactivated

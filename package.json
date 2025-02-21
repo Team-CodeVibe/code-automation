@@ -10,11 +10,28 @@
         "Other"
     ],
     "activationEvents": [
-        "onCommand:extension.analyzeCodebase",
-        "onCommand:extension.generateSummary"
+        "onStartupFinished"
     ],
     "main": "./out/extension.js",
     "contributes": {
+        "viewsContainers": {
+            "activitybar": [
+                {
+                    "id": "code-chat",
+                    "title": "Code Chat",
+                    "icon": "$(comment-discussion)"
+                }
+            ]
+        },
+        "views": {
+            "code-chat": [
+                {
+                    "type": "webview",
+                    "id": "codeChat.chatView",
+                    "name": "Code Chat"
+                }
+            ]
+        },
         "commands": [
             {
                 "command": "extension.analyzeCodebase",
