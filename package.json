@@ -32,13 +32,12 @@
         "watch": "tsc -watch -p ./",
         "pretest": "npm run compile && npm run lint",
         "lint": "eslint src",
-        "test": "vscode-test",
-        "postinstall": "node ./node_modules/vscode/bin/install"
+        "test": "vscode-test"
     },
     "devDependencies": {
         "@types/mocha": "^10.0.9",
         "@types/node": "20.x",
-        "@types/vscode": "^1.95.0",
+        "@types/vscode": "^1.93.0",
         "@typescript-eslint/eslint-plugin": "^8.10.0",
         "@typescript-eslint/parser": "^8.7.0",
         "@vscode/test-cli": "^0.0.10",
@@ -48,6 +47,9 @@
     },
     "dependencies": {
         "@pinecone-database/pinecone": "^4.0.0",
-        "dotenv": "^16.4.5"
+        "dotenv": "^16.4.5",
+        "openai": "^4.85.3",
+        "pinecone": "^0.1.0",
+        "vscode": "^1.1.37"
     }
 }
