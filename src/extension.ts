@@ -35,7 +35,7 @@ export function activate(ctx: vscode.ExtensionContext) {
     console.log('Extension "extension" is now active!');
 
     // Register Code Chat View
-    const codeChatView = new CodeChatView(context.extensionUri);
+    const codeChatView = new CodeChatView(vscode.Uri.file(context.extensionPath));
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(
             CodeChatView.viewType, 

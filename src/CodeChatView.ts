@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { marked } from 'marked';
 
 export class CodeChatView implements vscode.WebviewViewProvider {
     public static readonly viewType = 'codeChat.chatView';
@@ -53,9 +54,11 @@ export class CodeChatView implements vscode.WebviewViewProvider {
                         if (!response) {
                             throw new Error('No response generated. Make sure to analyze the codebase first.');
                         }
+                        // Convert Markdown to HTML
+                        const htmlResponse = marked(response as string);
                         this._view?.webview.postMessage({ 
                             type: 'response', 
-                            message: response,
+                            message: htmlResponse,
                             isMarkdown: true
                         });
                     } catch (err) {
@@ -99,6 +102,9 @@ export class CodeChatView implements vscode.WebviewViewProvider {
                         margin: 5px 0;
                         padding: 8px;
                         border-radius: 4px;
+                        background-color: var(--vscode-editor-background);
+                        color: var(--vscode-editor-foreground);
+                        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
                     }
                     .user-message {
                         background-color: var(--vscode-button-background);
@@ -193,7 +199,7 @@ export class CodeChatView implements vscode.WebviewViewProvider {
                         console.log('Received message:', message);
                         switch (message.type) {
                             case 'response':
-                                addMessage(message.message, false);
+                                addHtmlMessage(message.message, false);
                                 break;
                             case 'error':
                                 const errorDiv = document.createElement('div');
@@ -211,9 +217,28 @@ export class CodeChatView implements vscode.WebviewViewProvider {
                                 break;
                         }
                     });
+
+                    function addHtmlMessage(content, isUser = false) {
+                        const messageDiv = document.createElement('div');
+                        messageDiv.className = \`message \${isUser ? 'user-message' : 'assistant-message'}\`;
+                        messageDiv.innerHTML = content;
+                        messagesContainer.appendChild(messageDiv);
+                        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                    }
                 </script>
             </body>
             </html>
         `;
+    }
+
+    private convertMarkdownToPlainText(markdown: string): string {
+        return markdown
+            .replace(/#/g, '') // Remove headings
+            .replace(/\*\*/g, '') // Remove bold
+            .replace(/_/g, '') // Remove italics
+            .replace(/`/g, '') // Remove inline code
+            .replace(/~~/g, '') // Remove strikethrough
+            .replace(/\n{2,}/g, '\n') // Replace multiple newlines with a single newline
+            .trim();
     }
 } 

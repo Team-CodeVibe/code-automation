@@ -1,4 +1,4 @@
 openai>=1.12.0
-pinecone-client>=2.2.4
+pinecone>=2.2.4
 python-dotenv>=1.0.0
 tenacity>=9.0.0,<10.0.0
