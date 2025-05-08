@@ -30,7 +30,6 @@ export class CodeChatView implements vscode.WebviewViewProvider {
                         this._view?.webview.postMessage({ type: 'status', message: 'Analyzing codebase...' });
                         const workspaceFolders = vscode.workspace.workspaceFolders;
                         if (workspaceFolders) {
-                            const rootPath = workspaceFolders[0].uri.fsPath;
                             const result = await vscode.commands.executeCommand('extension.analyzeCodebase');
                             this._view?.webview.postMessage({ 
                                 type: 'response', 
@@ -47,14 +46,36 @@ export class CodeChatView implements vscode.WebviewViewProvider {
                     }
                     break;
 
+                case 'summarize':
+                    try {
+                        this._view?.webview.postMessage({ type: 'status', message: 'Generating summary...' });
+                        // Invoke summary command with a default prompt
+                        const summary = await vscode.commands.executeCommand('extension.generateSummary', 'Give me a summary of the codebase');
+                        if (!summary) {
+                            throw new Error('No summary generated. Make sure to analyze the codebase first.');
+                        }
+                        const htmlSummary = marked(summary as string);
+                        this._view?.webview.postMessage({ 
+                            type: 'response', 
+                            message: htmlSummary,
+                            isMarkdown: true
+                        });
+                    } catch (err) {
+                        console.error('Summarize error:', err);
+                        this._view?.webview.postMessage({ 
+                            type: 'error', 
+                            message: err instanceof Error ? err.message : 'Failed to generate summary' 
+                        });
+                    }
+                    break;
+
                 case 'query':
                     try {
                         this._view?.webview.postMessage({ type: 'status', message: 'Generating response...' });
-                        const response = await vscode.commands.executeCommand('extension.generateSummary', data.query);
+                        const response = await vscode.commands.executeCommand('extension.askCodebase', data.query);
                         if (!response) {
                             throw new Error('No response generated. Make sure to analyze the codebase first.');
                         }
-                        // Convert Markdown to HTML
                         const htmlResponse = marked(response as string);
                         this._view?.webview.postMessage({ 
                             type: 'response', 
@@ -89,6 +110,11 @@ export class CodeChatView implements vscode.WebviewViewProvider {
                         display: flex;
                         flex-direction: column;
                         height: calc(100vh - 120px);
+                    }
+                    .controls {
+                        display: flex;
+                        gap: 8px;
+                        margin-bottom: 8px;
                     }
                     .messages {
                         flex: 1;
@@ -150,11 +176,14 @@ export class CodeChatView implements vscode.WebviewViewProvider {
             </head>
             <body>
                 <div class="chat-container">
-                    <button id="analyzeBtn">Analyze Codebase</button>
+                    <div class="controls">
+                        <button id="analyzeBtn">Analyze Codebase</button>
+                        <button id="summarizeBtn">Summarize Codebase</button>
+                    </div>
                     <div class="messages" id="messages"></div>
                     <div class="input-container">
                         <input type="text" id="queryInput" placeholder="Ask about your codebase...">
-                        <button id="sendBtn">Send</button>
+                        <button id="sendBtn">Ask</button>
                     </div>
                 </div>
 
@@ -163,27 +192,39 @@ export class CodeChatView implements vscode.WebviewViewProvider {
                     const messagesContainer = document.getElementById('messages');
                     const queryInput = document.getElementById('queryInput');
                     const analyzeBtn = document.getElementById('analyzeBtn');
+                    const summarizeBtn = document.getElementById('summarizeBtn');
                     const sendBtn = document.getElementById('sendBtn');
 
                     function addMessage(content, isUser = false) {
                         const messageDiv = document.createElement('div');
-                        messageDiv.className = \`message \${isUser ? 'user-message' : 'assistant-message'}\`;
+                        messageDiv.className = 'message ' + (isUser ? 'user-message' : 'assistant-message');
                         messageDiv.textContent = content;
                         messagesContainer.appendChild(messageDiv);
                         messagesContainer.scrollTop = messagesContainer.scrollHeight;
                     }
 
+                    function addHtmlMessage(content) {
+                        const messageDiv = document.createElement('div');
+                        messageDiv.className = 'message assistant-message';
+                        messageDiv.innerHTML = content;
+                        messagesContainer.appendChild(messageDiv);
+                        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                    }
+
                     analyzeBtn.addEventListener('click', () => {
-                        console.log('Analyze button clicked');
                         vscode.postMessage({ type: 'analyze' });
+                    });
+
+                    summarizeBtn.addEventListener('click', () => {
+                        addMessage('Summarize the codebase', true);
+                        vscode.postMessage({ type: 'summarize' });
                     });
 
                     sendBtn.addEventListener('click', () => {
                         const query = queryInput.value.trim();
                         if (query) {
-                            console.log('Sending query:', query);
                             addMessage(query, true);
-                            vscode.postMessage({ type: 'query', query: query });
+                            vscode.postMessage({ type: 'query', query });
                             queryInput.value = '';
                         }
                     });
@@ -196,10 +237,9 @@ export class CodeChatView implements vscode.WebviewViewProvider {
 
                     window.addEventListener('message', event => {
                         const message = event.data;
-                        console.log('Received message:', message);
                         switch (message.type) {
                             case 'response':
-                                addHtmlMessage(message.message, false);
+                                addHtmlMessage(message.message);
                                 break;
                             case 'error':
                                 const errorDiv = document.createElement('div');
@@ -217,14 +257,6 @@ export class CodeChatView implements vscode.WebviewViewProvider {
                                 break;
                         }
                     });
-
-                    function addHtmlMessage(content, isUser = false) {
-                        const messageDiv = document.createElement('div');
-                        messageDiv.className = \`message \${isUser ? 'user-message' : 'assistant-message'}\`;
-                        messageDiv.innerHTML = content;
-                        messagesContainer.appendChild(messageDiv);
-                        messagesContainer.scrollTop = messagesContainer.scrollHeight;
-                    }
                 </script>
             </body>
             </html>
@@ -233,12 +265,12 @@ export class CodeChatView implements vscode.WebviewViewProvider {
 
     private convertMarkdownToPlainText(markdown: string): string {
         return markdown
-            .replace(/#/g, '') // Remove headings
-            .replace(/\*\*/g, '') // Remove bold
-            .replace(/_/g, '') // Remove italics
-            .replace(/`/g, '') // Remove inline code
-            .replace(/~~/g, '') // Remove strikethrough
-            .replace(/\n{2,}/g, '\n') // Replace multiple newlines with a single newline
+            .replace(/#/g, '')
+            .replace(/\*\*/g, '')
+            .replace(/_/g, '')
+            .replace(/`/g, '')
+            .replace(/~~/g, '')
+            .replace(/\n{2,}/g, '\n')
             .trim();
     }
-} 
+}

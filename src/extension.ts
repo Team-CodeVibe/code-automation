@@ -1,374 +1,223 @@
-import * as vscode from "vscode";
-import { execFile } from "child_process";
-import * as path from "path";
-import { Pinecone } from "@pinecone-database/pinecone";
-import * as dotenv from "dotenv";
-import * as crypto from "crypto";
-import { CodeChatView } from './CodeChatView';
+import * as vscode from 'vscode';
+import { execFile } from 'child_process';
+import * as path from 'path';
+import { Pinecone } from '@pinecone-database/pinecone';
+import * as dotenv from 'dotenv';
+import * as crypto from 'crypto';
 
 // Load environment variables from .env file
-dotenv.config({ path: path.join(__dirname, "..", ".env") });
+dotenv.config({ path: path.join(__dirname, '..', '.env') });
 
-// Initialize Pinecone
-const pinecone = new Pinecone({
-    apiKey: process.env.PINECONE_API_KEY!,
-});
+// Initialize Pinecone client
+const pinecone = new Pinecone({ apiKey: process.env.PINECONE_API_KEY! });
 
-interface RecordMetadata {
-    content?: string;
-}
-
-// Add this function to generate consistent index names
+// Generate a consistent index name for the current workspace
 function getProjectHash(workspacePath: string): string {
-    const hash = crypto
-        .createHash("md5")
-        .update(workspacePath)
-        .digest("hex")
-        .slice(0, 8);
-    return `code-index-${hash}`;
+  const hash = crypto.createHash('md5').update(workspacePath).digest('hex').slice(0, 8);
+  return `code-index-${hash}`;
 }
 
 let context: vscode.ExtensionContext;
 
 export function activate(ctx: vscode.ExtensionContext) {
-    context = ctx;
-    console.log('Extension "extension" is now active!');
+  context = ctx;
+  console.log('Extension "extension" is now active!');
 
-    // Register Code Chat View
-    const codeChatView = new CodeChatView(vscode.Uri.file(context.extensionPath));
-    context.subscriptions.push(
-        vscode.window.registerWebviewViewProvider(
-            CodeChatView.viewType, 
-            codeChatView,
-            {
-                webviewOptions: {
-                    retainContextWhenHidden: true
-                }
-            }
-        )
-    );
+  // Register Code Chat View
+  const codeChatView = new (require('./CodeChatView').CodeChatView)(
+    vscode.Uri.file(context.extensionPath)
+  );
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      (require('./CodeChatView').CodeChatView).viewType,
+      codeChatView,
+      { webviewOptions: { retainContextWhenHidden: true } }
+    )
+  );
 
-    // Automatically show the chat view
-    vscode.commands.executeCommand('workbench.view.extension.code-chat');
+  // Expose commands
+  context.subscriptions.push(
+    vscode.commands.registerCommand('extension.analyzeCodebase', analyzeCommand)
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand('extension.generateSummary', summaryCommand)
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand('extension.askCodebase', askCommand)
+  );
 
-    // Initialize Pinecone
-    // Register the command that invokes the analyzeCodebase function
-    const analyzeCommand = vscode.commands.registerCommand(
-        "extension.analyzeCodebase",
-        async () => {
-            const workspaceFolders = vscode.workspace.workspaceFolders;
-            if (workspaceFolders && workspaceFolders.length > 0) {
-                const rootPath = workspaceFolders[0].uri.fsPath;
-                try {
-                    const analysisResult = await analyzeCodebase(rootPath);
-                    vscode.window.showInformationMessage(
-                        "Codebase analyzed successfully!"
-                    );
-                    console.log("Analysis Result:", analysisResult);
-                    return "Codebase analyzed successfully!";
-                } catch (error) {
-                    vscode.window.showErrorMessage(
-                        `Error analyzing codebase: ${error.message}`
-                    );
-                    console.error("Analysis Error:", error);
-                    throw error;
-                }
-            } else {
-                throw new Error(
-                    "No workspace folder is open. Please open a folder to analyze."
-                );
-            }
-        }
-    );
-
-    // Register the command that generates a summary based on user query
-    const summaryCommand = vscode.commands.registerCommand(
-        "extension.generateSummary",
-        async (query?: string) => {
-            try {
-                const summary = await generateSummary(query);
-                return summary; // This will be used by the chat interface
-            } catch (error) {
-                vscode.window.showErrorMessage(
-                    `Error generating summary: ${error.message}`
-                );
-                console.error("Summary Error:", error);
-                throw error;
-            }
-        }
-    );
-
-    context.subscriptions.push(analyzeCommand);
-    context.subscriptions.push(summaryCommand);
+  // Automatically show the chat view
+  vscode.commands.executeCommand('workbench.view.extension.code-chat');
 }
 
+async function analyzeCommand(): Promise<string> {
+  const folders = vscode.workspace.workspaceFolders;
+  if (!folders || folders.length === 0) {
+    throw new Error('Please open a folder before analyzing.');
+  }
+  const rootPath = folders[0].uri.fsPath;
+  const result = await analyzeCodebase(rootPath);
+  return `Successfully analyzed ${result.length} code elements.`;
+}
+
+async function summaryCommand(query?: string): Promise<string | undefined> {
+  return generateSummary(query);
+}
+
+async function askCommand(question?: string): Promise<string | undefined> {
+  return answerQuestion(question);
+}
+
+// Run the Python analyzer and index results
 function analyzeCodebase(directoryPath: string): Promise<any[]> {
-    return new Promise((resolve, reject) => {
-        const pythonExecutable = "python3";
-        const analyzerScript = path.join(__dirname, "..", "analyzer.py");
+  return new Promise((resolve, reject) => {
+    const python = 'python3';
+    const script = path.join(__dirname, '..', 'analyzer.py');
+    const env = { ...process.env };
 
-        const env = {
-            ...process.env,
-            OPENAI_API_KEY: process.env.OPENAI_API_KEY,
-            PINECONE_API_KEY: process.env.PINECONE_API_KEY,
-        };
-
-        console.log("Analyzing directory:", directoryPath);
-        console.log("Using analyzer script:", analyzerScript);
-
-        vscode.window.withProgress(
-            {
-                location: vscode.ProgressLocation.Notification,
-                title: "Analyzing codebase...",
-                cancellable: false,
-            },
-            (progress) => {
-                return new Promise<void>((progressResolve) => {
-                    execFile(
-                        pythonExecutable,
-                        [analyzerScript, directoryPath],
-                        { env },
-                        async (error, stdout, stderr) => {
-                            console.log("Python script stdout:", stdout);
-                            console.log("Python script stderr:", stderr);
-
-                            if (error) {
-                                console.error("Execution error:", error);
-                                reject(
-                                    new Error(
-                                        stderr || "Unknown error occurred."
-                                    )
-                                );
-                                progressResolve();
-                                return;
-                            }
-
-                            try {
-                                const cleanedOutput = stdout.trim();
-                                const analysisResult =
-                                    JSON.parse(cleanedOutput);
-
-                                // Store the index name in workspace state
-                                const indexName = getProjectHash(directoryPath);
-                                await context.workspaceState.update(
-                                    "currentIndexName",
-                                    indexName
-                                );
-
-                                console.log("Using index:", indexName);
-                                console.log(
-                                    "Successfully analyzed files:",
-                                    analysisResult.length
-                                );
-
-                                vscode.window.showInformationMessage(
-                                    `Successfully analyzed ${analysisResult.length} code elements.`
-                                );
-                                resolve(analysisResult);
-                            } catch (parseError) {
-                                console.error(
-                                    "Failed to parse JSON:",
-                                    parseError
-                                );
-                                reject(
-                                    new Error(
-                                        "Invalid JSON output from analyzer.py"
-                                    )
-                                );
-                            }
-
-                            progressResolve();
-                        }
-                    );
-                });
+    vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'Analyzing codebase...', cancellable: false },
+      () =>
+        new Promise<void>(async (progressResolve) => {
+          execFile(python, [script, directoryPath], { env }, async (err, stdout, stderr) => {
+            console.log('Analyzer stdout:', stdout);
+            console.error('Analyzer stderr:', stderr);
+            if (err) {
+              reject(new Error(stderr || err.message));
+            } else {
+              const elements = JSON.parse(stdout.trim());
+              const indexName = getProjectHash(directoryPath);
+              await context.workspaceState.update('currentIndexName', indexName);
+              console.log('Using index:', indexName);
+              resolve(elements);
             }
-        );
-    });
-}
-
-async function generateSummary(query?: string) {
-    try {
-        // If no query provided, prompt for one
-        if (!query) {
-            query = await vscode.window.showInputBox({
-                prompt: "Enter your query about the codebase",
-                placeHolder: "e.g., Give a summary of the codebase",
-                ignoreFocusOut: true,
-            });
-        }
-
-        if (!query) {
-            return;
-        }
-
-        // Get semantic search query using GPT
-        const searchQuery = await getSemanticSearchQuery(query);
-
-        // Get relevant code elements
-        const matches = await searchCodebase(searchQuery);
-        if (!matches.length) {
-            throw new Error("No matches found. Please make sure you've analyzed your codebase first.");
-        }
-
-        // Generate and display summary
-        const summary = await generateAndDisplaySummary(query, matches);
-        
-        // Return the summary so it can be displayed in the chat
-        return summary;
-    } catch (error) {
-        throw error;
-    }
-}
-
-async function getSemanticSearchQuery(query: string): Promise<string> {
-    const chatResponse = await fetch(
-        "https://api.openai.com/v1/chat/completions",
-        {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-            },
-            body: JSON.stringify({
-                model: "gpt-4-turbo-preview",
-                messages: [
-                    {
-                        role: "system",
-                        content:
-                            "Convert the user's query into a clear, specific search query for generating a summary of the codebase or a specific file user has asked to summarize.",
-                    },
-                    {
-                        role: "user",
-                        content: query,
-                    },
-                ],
-                temperature: 0.3, // Lower temperature for more focused results
-                max_tokens: 100, // Reduced tokens for faster response
-            }),
-        }
-    );
-
-    const chatData = await chatResponse.json();
-    if (chatData.error) {
-        throw new Error(chatData.error.message);
-    }
-
-    return chatData.choices[0].message.content.trim();
-}
-
-async function searchCodebase(searchQuery: string) {
-    // Get the current index name from workspace state
-    const indexName = context.workspaceState.get("currentIndexName") as string;
-    if (!indexName) {
-        throw new Error("No index found. Please analyze the codebase first.");
-    }
-
-    // Get embeddings from OpenAI
-    const embeddingResponse = await fetch(
-        "https://api.openai.com/v1/embeddings",
-        {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-            },
-            body: JSON.stringify({
-                input: searchQuery,
-                model: "text-embedding-3-small",
-                dimensions: 256,
-            }),
-        }
-    );
-
-    const embeddingData = await embeddingResponse.json();
-    const vector = embeddingData.data[0].embedding;
-
-    // Use the dynamic index name
-    const index = pinecone.Index(indexName);
-    const searchResponse = await index.query({
-        vector,
-        topK: 10,
-        includeMetadata: true,
-    });
-
-    return searchResponse.matches || [];
-}
-
-async function generateAndDisplaySummary(query: string, matches: any[]) {
-    // Group matches by file type and structure
-    const groupedMatches = matches.reduce((acc: any, match) => {
-        const metadata = match.metadata as any;
-        const fileExt = path.extname(metadata.file_path);
-        if (!acc[fileExt]) {
-            acc[fileExt] = [];
-        }
-        acc[fileExt].push(match);
-        return acc;
-    }, {});
-
-    // Format the retrieved content with better structure
-    const contextContent = Object.entries(groupedMatches)
-        .map(([fileType, matches]) => {
-            const matchesContent = (matches as any[])
-                .map((match) => {
-                    const metadata = match.metadata as any;
-                    return `
-Type: ${metadata.type.toUpperCase()}
-Name: ${metadata.name}
-File: ${metadata.file_path}
-Content:
-${metadata.content}
--------------------`;
-                })
-                .join("\n\n");
-            return `## ${fileType.toUpperCase()} Files\n\n${matchesContent}`;
+            progressResolve();
+          });
         })
-        .join("\n\n");
-
-    // Generate summary with better prompting
-    const finalSummaryResponse = await fetch(
-        "https://api.openai.com/v1/chat/completions",
-        {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-            },
-            body: JSON.stringify({
-                model: "gpt-4-turbo-preview",
-                messages: [
-                    {
-                        role: "system",
-                        content: `You are a technical documentation expert. Provide a detailed and comprehensive summary of the codebase with the following structure:
-
-1. Project Overview: Detailed description of what the project does
-2. Main Components: List and describe the all the key files components/files in the codebase in detail
-3. Core Functionality: Explain the main features and how they work
-4. Technical Details: Important implementation details, patterns used
-
-Focus on creating a detailed and organized summary that helps developers who are new to the codebase understand the codebase quickly.`,
-                    },
-                    {
-                        role: "user",
-                        content: `Analyze this codebase and provide a structured summary:\n\n${contextContent}`,
-                    },
-                ],
-                temperature: 0.3,
-                max_tokens: 1500,
-            }),
-        }
     );
-
-    const finalSummaryData = await finalSummaryResponse.json();
-    if (finalSummaryData.error) {
-        throw new Error(finalSummaryData.error.message);
-    }
-
-    const summary = finalSummaryData.choices[0].message.content.trim();
-
-    return summary;
+  });
 }
 
-// This method is called when your extension is deactivated
+// SUMMARY FLOW
+async function generateSummary(query?: string): Promise<string | undefined> {
+  if (!query) {
+    query = await vscode.window.showInputBox({ prompt: 'Enter summary prompt' });
+    if (!query) return;
+  }
+  const searchQuery = await getSemanticSearchQuery(query);
+  const matches = await searchCodebase(searchQuery);
+  if (!matches.length) {
+    throw new Error('No matches found. Have you analyzed the codebase?');
+  }
+  // Group and format context for summary
+  const grouped = matches.reduce((acc: any, m: any) => {
+    const ext = path.extname(m.metadata.file_path) || '.txt';
+    (acc[ext] = acc[ext] || []).push(m);
+    return acc;
+  }, {});
+  let contextContent = '';
+  for (const [ext, group] of Object.entries(grouped)) {
+    contextContent += `## ${ext.toUpperCase()} Files\n`;
+    for (const m of group as any[]) {
+      contextContent += `### ${m.metadata.name}\n${m.metadata.source}\n\n`;
+    }
+  }
+  const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+    body: JSON.stringify({
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: 'You are a documentation expert. Summarize the codebase using the context below.' },
+        { role: 'user', content: `Summarize the codebase:\n\n${contextContent}` }
+      ],
+      temperature: 0.3,
+      max_tokens: 1500
+    })
+  });
+  const data = await resp.json();
+  if (data.error) {throw new Error(data.error.message);}
+  return data.choices[0].message.content.trim();
+}
+
+// GENERIC Q&A FLOW
+async function answerQuestion(question?: string): Promise<string | undefined> {
+  if (!question) {
+    question = await vscode.window.showInputBox({ prompt: 'What do you want to know about the codebase?' });
+    if (!question) return;
+  }
+  const searchQuery = await getSemanticSearchQuery(question);
+  const matches = await searchCodebase(searchQuery);
+  if (!matches.length) {
+    throw new Error('No relevant code found. Did you analyze the codebase?');
+  }
+  return generateAnswerFromContext(question, matches);
+}
+
+async function generateAnswerFromContext(question: string, matches: any[]): Promise<string> {
+  // Assemble code snippets
+  const contextContent = matches
+    .map(m => {
+      const meta = m.metadata as any;
+      const name = path.basename(meta.file_path);
+      return `### ${name}\n\n\`\`\`python\n${meta.source}\n\`\`\``;
+    })
+    .join('\n\n');
+
+  const payload = {
+    model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+    messages: [
+      {
+        role: 'system',
+        content: `You are a code assistant. Answer the user’s question using ONLY the code snippets below, and always include the relevant code in your response.\n\n${contextContent}`
+      },
+      { role: 'user', content: question }
+    ],
+    temperature: 0.2,
+    max_tokens: 1024
+  };
+  const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+    body: JSON.stringify(payload)
+  });
+  const data = await resp.json();
+  if (data.error) {throw new Error(data.error.message);}
+  return data.choices[0].message.content.trim();
+}
+
+async function getSemanticSearchQuery(text: string): Promise<string> {
+  const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+    body: JSON.stringify({
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: 'Generate a concise search string including file and function names referenced by the user.' },
+        { role: 'user', content: text }
+      ],
+      temperature: 0.0,
+      max_tokens: 50
+    })
+  });
+  const j = await resp.json();
+  if (j.error) {throw new Error(j.error.message);}
+  return j.choices[0].message.content.trim();
+}
+
+async function searchCodebase(query: string): Promise<any[]> {
+  const indexName = context.workspaceState.get('currentIndexName') as string;
+  if (!indexName) {throw new Error('No index found. Analyze first.');}
+  const embedRes = await fetch('https://api.openai.com/v1/embeddings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+    body: JSON.stringify({ input: query, model: 'text-embedding-3-small', dimensions: 256 })
+  });
+  const embedData = await embedRes.json();
+  const vector = embedData.data[0].embedding;
+  const index = pinecone.Index(indexName);
+  const searchRes = await index.query({ vector, topK: 10, includeMetadata: true });
+  return searchRes.matches || [];
+}
+
 export function deactivate() {}
-// 5. Dependencies: List key external dependencies and their purpose
