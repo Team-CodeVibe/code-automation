@@ -4,6 +4,8 @@ import * as path from 'path';
 import { Pinecone } from '@pinecone-database/pinecone';
 import * as dotenv from 'dotenv';
 import * as crypto from 'crypto';
+import { CodeTourManager } from './CodeTour';
+import { CodeChatView } from './CodeChatView';
 
 // Load environment variables from .env file
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
@@ -24,12 +26,13 @@ export function activate(ctx: vscode.ExtensionContext) {
   console.log('Extension "extension" is now active!');
 
   // Register Code Chat View
-  const codeChatView = new (require('./CodeChatView').CodeChatView)(
-    vscode.Uri.file(context.extensionPath)
+  const codeChatView = new CodeChatView(
+    vscode.Uri.file(context.extensionPath),
+    context
   );
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
-      (require('./CodeChatView').CodeChatView).viewType,
+      CodeChatView.viewType,
       codeChatView,
       { webviewOptions: { retainContextWhenHidden: true } }
     )
@@ -45,9 +48,23 @@ export function activate(ctx: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('extension.askCodebase', askCommand)
   );
+  context.subscriptions.push(
+    vscode.commands.registerCommand('extension.generateQuiz', generateQuizCommand)
+  );
 
   // Automatically show the chat view
   vscode.commands.executeCommand('workbench.view.extension.code-chat');
+
+  // Add tour command
+  context.subscriptions.push(
+    vscode.commands.registerCommand('extension.startCodeTour', () => {
+      const codeChatView = new CodeChatView(
+        vscode.Uri.file(context.extensionPath),
+        context
+      );
+      codeChatView.startTour();
+    })
+  );
 }
 
 async function analyzeCommand(): Promise<string> {
@@ -126,7 +143,7 @@ async function generateSummary(query?: string): Promise<string | undefined> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
     body: JSON.stringify({
-      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      model: process.env.OPENAI_MODEL || 'gpt-4o',
       messages: [
         { role: 'system', content: 'You are a documentation expert. Summarize the codebase using the context below.' },
         { role: 'user', content: `Summarize the codebase:\n\n${contextContent}` }
@@ -165,11 +182,11 @@ async function generateAnswerFromContext(question: string, matches: any[]): Prom
     .join('\n\n');
 
   const payload = {
-    model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+    model: process.env.OPENAI_MODEL || 'gpt-4o',
     messages: [
       {
         role: 'system',
-        content: `You are a code assistant. Answer the user’s question using ONLY the code snippets below, and always include the relevant code in your response.\n\n${contextContent}`
+        content: `You are a code assistant. Answer the user's question using ONLY the code snippets below, and always include the relevant code in your response.\n\n${contextContent}`
       },
       { role: 'user', content: question }
     ],
@@ -191,7 +208,7 @@ async function getSemanticSearchQuery(text: string): Promise<string> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
     body: JSON.stringify({
-      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      model: process.env.OPENAI_MODEL || 'gpt-4o',
       messages: [
         { role: 'system', content: 'Generate a concise search string including file and function names referenced by the user.' },
         { role: 'user', content: text }
@@ -218,6 +235,85 @@ async function searchCodebase(query: string): Promise<any[]> {
   const index = pinecone.Index(indexName);
   const searchRes = await index.query({ vector, topK: 10, includeMetadata: true });
   return searchRes.matches || [];
+}
+
+async function generateQuizCommand(): Promise<string | undefined> {
+  // Get a broad search query to find important code elements
+  const searchQuery = await getSemanticSearchQuery("Find important code elements, functions, and classes");
+  const matches = await searchCodebase(searchQuery);
+  
+  if (!matches.length) {
+    throw new Error('No code found. Have you analyzed the codebase?');
+  }
+
+  // Format code snippets for the quiz generation
+  const contextContent = matches
+    .map(m => {
+      const meta = m.metadata as any;
+      const name = path.basename(meta.file_path);
+      return `### ${name}\n\n\`\`\`python\n${meta.source}\n\`\`\``;
+    })
+    .join('\n\n');
+
+  // Call OpenAI to generate quiz questions
+  const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+    body: JSON.stringify({
+      model: process.env.OPENAI_MODEL || 'gpt-4o',
+      messages: [
+        {
+          role: 'system',
+          content: `You are a senior software architect creating an onboarding quiz for new developers. 
+          Create 5 multiple-choice questions that help developers understand the codebase's architecture, design patterns, and key concepts.
+          
+          Questions should:
+          1. Focus on architectural decisions and their rationale
+          2. Cover the main components and how they interact
+          3. Test understanding of the codebase's structure and organization
+          4. Include questions about error handling and edge cases
+          5. Cover important design patterns and their implementation
+          
+          IMPORTANT: Return ONLY a valid JSON array of question objects. Do not include any markdown formatting, code blocks, or additional text.
+          Each question object must follow this exact structure:
+          {
+            "question": "The question text",
+            "options": {
+              "A": "Option A text",
+              "B": "Option B text",
+              "C": "Option C text",
+              "D": "Option D text"
+            },
+            "correct": "A",
+            "explanation": "Detailed explanation of why this is correct, including relevant code examples and architectural considerations"
+          }
+          
+          Make the questions progressively more challenging:
+          - Q1: Basic architecture and component understanding
+          - Q2: Component interactions and data flow
+          - Q3: Error handling and edge cases
+          - Q4: Design patterns and their implementation
+          - Q5: Complex scenarios and system behavior
+          
+          Use this code as reference:\n\n${contextContent}`
+        }
+      ],
+      temperature: 0.7,
+      max_tokens: 1500
+    })
+  });
+
+  const data = await resp.json();
+  if (data.error) { throw new Error(data.error.message); }
+  
+  try {
+    // Parse the JSON response and format it for display
+    const questions = JSON.parse(data.choices[0].message.content.trim());
+    return JSON.stringify(questions);
+  } catch (error) {
+    console.error('Failed to parse quiz questions:', error);
+    throw new Error('Failed to generate valid quiz questions. Please try again.');
+  }
 }
 
 export function deactivate() {}
