@@ -1,9 +1,11 @@
-import * as vscode from 'vscode';
-import { marked } from 'marked';
-import { CodeTourManager } from './CodeTour';
+import * as vscode from "vscode";
+import { marked } from "marked";
+import { CodeTourManager } from "./CodeTour";
+import { DocumentationGenerator } from "./DocumentationGenerator";
+import * as path from "path";
 
 export class CodeChatView implements vscode.WebviewViewProvider {
-    public static readonly viewType = 'codeChat.chatView';
+    public static readonly viewType = "codeChat.chatView";
     private _view?: vscode.WebviewView;
     private _tourManager: CodeTourManager;
 
@@ -17,149 +19,244 @@ export class CodeChatView implements vscode.WebviewViewProvider {
     public resolveWebviewView(
         webviewView: vscode.WebviewView,
         context: vscode.WebviewViewResolveContext,
-        _token: vscode.CancellationToken,
+        _token: vscode.CancellationToken
     ) {
         this._view = webviewView;
 
         webviewView.webview.options = {
             enableScripts: true,
-            localResourceRoots: [this._extensionUri]
+            localResourceRoots: [this._extensionUri],
         };
 
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
-        webviewView.webview.onDidReceiveMessage(async data => {
-            console.log('Received message:', data.type);
+        webviewView.webview.onDidReceiveMessage(async (data) => {
+            console.log("Received message:", data.type);
             switch (data.type) {
-                case 'analyze':
+                case "analyze":
                     try {
-                        this._view?.webview.postMessage({ type: 'status', message: 'Analyzing codebase...' });
-                        const workspaceFolders = vscode.workspace.workspaceFolders;
+                        this._view?.webview.postMessage({
+                            type: "status",
+                            message: "Analyzing codebase...",
+                        });
+                        const workspaceFolders =
+                            vscode.workspace.workspaceFolders;
                         if (workspaceFolders) {
-                            const result = await vscode.commands.executeCommand('extension.analyzeCodebase');
-                            this._view?.webview.postMessage({ 
-                                type: 'response', 
-                                message: result || 'Codebase analyzed successfully!',
-                                isMarkdown: false
+                            const result = await vscode.commands.executeCommand(
+                                "extension.analyzeCodebase"
+                            );
+                            this._view?.webview.postMessage({
+                                type: "response",
+                                message:
+                                    result || "Codebase analyzed successfully!",
+                                isMarkdown: false,
                             });
                         }
                     } catch (err) {
-                        console.error('Analysis error:', err);
-                        this._view?.webview.postMessage({ 
-                            type: 'error', 
-                            message: err instanceof Error ? err.message : 'Failed to analyze codebase'
+                        console.error("Analysis error:", err);
+                        this._view?.webview.postMessage({
+                            type: "error",
+                            message:
+                                err instanceof Error
+                                    ? err.message
+                                    : "Failed to analyze codebase",
                         });
                     }
                     break;
 
-                case 'summarize':
+                case "summarize":
                     try {
-                        this._view?.webview.postMessage({ type: 'status', message: 'Generating summary...' });
+                        this._view?.webview.postMessage({
+                            type: "status",
+                            message: "Generating summary...",
+                        });
                         // Invoke summary command with a default prompt
-                        const summary = await vscode.commands.executeCommand('extension.generateSummary', 'Give me a summary of the codebase');
+                        const summary = await vscode.commands.executeCommand(
+                            "extension.generateSummary",
+                            "Give me a summary of the codebase"
+                        );
                         if (!summary) {
-                            throw new Error('No summary generated. Make sure to analyze the codebase first.');
+                            throw new Error(
+                                "No summary generated. Make sure to analyze the codebase first."
+                            );
                         }
                         const htmlSummary = marked(summary as string);
-                        this._view?.webview.postMessage({ 
-                            type: 'response', 
+                        this._view?.webview.postMessage({
+                            type: "response",
                             message: htmlSummary,
-                            isMarkdown: true
+                            isMarkdown: true,
                         });
                     } catch (err) {
-                        console.error('Summarize error:', err);
-                        this._view?.webview.postMessage({ 
-                            type: 'error', 
-                            message: err instanceof Error ? err.message : 'Failed to generate summary' 
+                        console.error("Summarize error:", err);
+                        this._view?.webview.postMessage({
+                            type: "error",
+                            message:
+                                err instanceof Error
+                                    ? err.message
+                                    : "Failed to generate summary",
                         });
                     }
                     break;
 
-                case 'query':
+                case "query":
                     try {
-                        this._view?.webview.postMessage({ type: 'status', message: 'Generating response...' });
-                        const response = await vscode.commands.executeCommand('extension.askCodebase', data.query);
+                        this._view?.webview.postMessage({
+                            type: "status",
+                            message: "Generating response...",
+                        });
+                        const response = await vscode.commands.executeCommand(
+                            "extension.askCodebase",
+                            data.query
+                        );
                         if (!response) {
-                            throw new Error('No response generated. Make sure to analyze the codebase first.');
+                            throw new Error(
+                                "No response generated. Make sure to analyze the codebase first."
+                            );
                         }
                         const htmlResponse = marked(response as string);
-                        this._view?.webview.postMessage({ 
-                            type: 'response', 
+                        this._view?.webview.postMessage({
+                            type: "response",
                             message: htmlResponse,
-                            isMarkdown: true
+                            isMarkdown: true,
                         });
                     } catch (err) {
-                        console.error('Query error:', err);
-                        this._view?.webview.postMessage({ 
-                            type: 'error', 
-                            message: err instanceof Error ? err.message : 'Failed to generate response' 
+                        console.error("Query error:", err);
+                        this._view?.webview.postMessage({
+                            type: "error",
+                            message:
+                                err instanceof Error
+                                    ? err.message
+                                    : "Failed to generate response",
                         });
                     }
                     break;
 
-                case 'quiz':
+                case "quiz":
                     try {
-                        this._view?.webview.postMessage({ type: 'status', message: 'Generating quiz...' });
-                        const quiz = await vscode.commands.executeCommand('extension.generateQuiz');
+                        this._view?.webview.postMessage({
+                            type: "status",
+                            message: "Generating quiz...",
+                        });
+                        const quiz = await vscode.commands.executeCommand(
+                            "extension.generateQuiz"
+                        );
                         if (!quiz) {
-                            throw new Error('No quiz generated. Make sure to analyze the codebase first.');
+                            throw new Error(
+                                "No quiz generated. Make sure to analyze the codebase first."
+                            );
                         }
                         const questions = JSON.parse(quiz as string);
                         const htmlQuiz = this._renderQuiz(questions);
-                        this._view?.webview.postMessage({ 
-                            type: 'response', 
+                        this._view?.webview.postMessage({
+                            type: "response",
                             message: htmlQuiz,
                             isMarkdown: false,
                             isQuiz: true,
-                            questions: questions
+                            questions: questions,
                         });
                     } catch (err) {
-                        console.error('Quiz generation error:', err);
-                        this._view?.webview.postMessage({ 
-                            type: 'error', 
-                            message: err instanceof Error ? err.message : 'Failed to generate quiz' 
+                        console.error("Quiz generation error:", err);
+                        this._view?.webview.postMessage({
+                            type: "error",
+                            message:
+                                err instanceof Error
+                                    ? err.message
+                                    : "Failed to generate quiz",
                         });
                     }
                     break;
 
-                case 'start-tour':
-                    console.log('Handling start-tour message');
+                case "start-tour":
+                    console.log("Handling start-tour message");
                     await this.startTour();
                     break;
-                
-                case 'tour-next':
+
+                case "tour-next":
                     this._tourManager.nextStep();
                     break;
-                
-                case 'tour-previous':
+
+                case "tour-previous":
                     this._tourManager.previousStep();
                     break;
-                
-                case 'tour-end':
+
+                case "tour-end":
                     this._tourManager.endTour();
+                    break;
+
+                case "generate-documentation":
+                    try {
+                        this._view?.webview.postMessage({
+                            type: "status",
+                            message: "Generating documentation...",
+                        });
+                        const options = {
+                            sections: {
+                                architecture: true,
+                                api: true,
+                            },
+                            outputPath: path.join(
+                                vscode.workspace.workspaceFolders![0].uri
+                                    .fsPath,
+                                "documentation.md"
+                            ),
+                        };
+                        const generator = new DocumentationGenerator(options);
+                        const documentation = await generator.generate();
+
+                        // Show the documentation in a new editor
+                        const doc = await vscode.workspace.openTextDocument({
+                            content: documentation,
+                            language: "markdown",
+                        });
+                        await vscode.window.showTextDocument(doc);
+
+                        this._view?.webview.postMessage({
+                            type: "response",
+                            message:
+                                "Documentation generated successfully! Check the new editor tab.",
+                            isMarkdown: false,
+                        });
+                    } catch (err) {
+                        console.error("Documentation generation error:", err);
+                        this._view?.webview.postMessage({
+                            type: "error",
+                            message:
+                                err instanceof Error
+                                    ? err.message
+                                    : "Failed to generate documentation",
+                        });
+                    }
                     break;
             }
         });
     }
 
     private _renderQuiz(questions: any[]): string {
-        const quizHtml = questions.map((q, index) => `
+        const quizHtml = questions
+            .map(
+                (q, index) => `
             <div class="quiz-question" data-question="${index}">
                 <h3>Question ${index + 1}</h3>
                 <p>${q.question}</p>
                 <div class="quiz-options">
-                    ${Object.entries(q.options).map(([key, value]) => `
+                    ${Object.entries(q.options)
+                        .map(
+                            ([key, value]) => `
                         <div class="quiz-option" data-option="${key}" data-question="${index}">
                             ${key}) ${value}
                         </div>
-                    `).join('')}
+                    `
+                        )
+                        .join("")}
                 </div>
                 <div class="quiz-explanation" data-question="${index}">
                     ${q.explanation}
                 </div>
             </div>
-        `).join('');
-        
+        `
+            )
+            .join("");
+
         return `<div class="quiz-container">${quizHtml}</div>`;
     }
 
@@ -331,6 +428,7 @@ export class CodeChatView implements vscode.WebviewViewProvider {
                         <button id="summarizeBtn">Summarize Codebase</button>
                         <button id="quizBtn">Generate Quiz</button>
                         <button id="startTourBtn">Start Code Tour</button>
+                        <button id="generateDocBtn">Generate Documentation</button>
                     </div>
                     <div class="messages" id="messages"></div>
                     <div class="input-container">
@@ -359,6 +457,7 @@ export class CodeChatView implements vscode.WebviewViewProvider {
                     const quizBtn = document.getElementById('quizBtn');
                     const sendBtn = document.getElementById('sendBtn');
                     const startTourBtn = document.getElementById('startTourBtn');
+                    const generateDocBtn = document.getElementById('generateDocBtn');
 
                     function addMessage(content, isUser = false) {
                         const messageDiv = document.createElement('div');
@@ -422,6 +521,11 @@ export class CodeChatView implements vscode.WebviewViewProvider {
                     
                     document.getElementById('endTour').addEventListener('click', () => {
                         vscode.postMessage({ type: 'tour-end' });
+                    });
+
+                    generateDocBtn.addEventListener('click', () => {
+                        addMessage('Generating documentation...', true);
+                        vscode.postMessage({ type: 'generate-documentation' });
                     });
 
                     window.addEventListener('message', event => {
@@ -498,19 +602,19 @@ export class CodeChatView implements vscode.WebviewViewProvider {
 
     private convertMarkdownToPlainText(markdown: string): string {
         return markdown
-            .replace(/#/g, '')
-            .replace(/\*\*/g, '')
-            .replace(/_/g, '')
-            .replace(/`/g, '')
-            .replace(/~~/g, '')
-            .replace(/\n{2,}/g, '\n')
+            .replace(/#/g, "")
+            .replace(/\*\*/g, "")
+            .replace(/_/g, "")
+            .replace(/`/g, "")
+            .replace(/~~/g, "")
+            .replace(/\n{2,}/g, "\n")
             .trim();
     }
 
     public async startTour() {
-        console.log('Starting tour...');
+        console.log("Starting tour...");
         if (!this._view) {
-            console.error('View is not initialized');
+            console.error("View is not initialized");
             return;
         }
         this._tourManager.setView(this._view);
