@@ -1,41 +1,78 @@
 {
-  "name": "extension",
-  "displayName": "extension",
-  "description": "",
-  "version": "0.0.1",
-  "engines": {
-    "vscode": "^1.95.0"
-  },
-  "categories": [
-    "Other"
-  ],
-  "activationEvents": [],
-  "main": "./out/extension.js",
-  "contributes": {
-    "commands": [
-      {
-        "command": "extension.helloWorld",
-        "title": "Hello World"
-      }
-    ]
-  },
-  "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
-    "pretest": "npm run compile && npm run lint",
-    "lint": "eslint src",
-    "test": "vscode-test"
-  },
-  "devDependencies": {
-    "@types/vscode": "^1.95.0",
-    "@types/mocha": "^10.0.9",
-    "@types/node": "20.x",
-    "@typescript-eslint/eslint-plugin": "^8.10.0",
-    "@typescript-eslint/parser": "^8.7.0",
-    "eslint": "^9.13.0",
-    "typescript": "^5.6.3",
-    "@vscode/test-cli": "^0.0.10",
-    "@vscode/test-electron": "^2.4.1"
-  }
+    "name": "extension",
+    "displayName": "extension",
+    "description": "",
+    "version": "0.0.1",
+    "engines": {
+        "vscode": "^1.93.0"
+    },
+    "categories": [
+        "Other"
+    ],
+    "activationEvents": [
+        "onStartupFinished"
+    ],
+    "main": "./out/extension.js",
+    "contributes": {
+        "viewsContainers": {
+            "activitybar": [
+                {
+                    "id": "code-chat",
+                    "title": "Code Chat",
+                    "icon": "$(comment-discussion)"
+                }
+            ]
+        },
+        "views": {
+            "code-chat": [
+                {
+                    "type": "webview",
+                    "id": "codeChat.chatView",
+                    "name": "Code Chat"
+                }
+            ]
+        },
+        "commands": [
+            {
+                "command": "extension.analyzeCodebase",
+                "title": "Analyze Codebase"
+            },
+            {
+                "command": "extension.generateSummary",
+                "title": "Generate Summary"
+            },
+            {
+                "command": "extension.askCodebase",
+                "title": "Ask Codebase Question"
+            }
+        ]
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "pretest": "npm run compile && npm run lint",
+        "lint": "eslint src",
+        "test": "vscode-test"
+    },
+    "devDependencies": {
+        "@types/marked": "^5.0.2",
+        "@types/mocha": "^10.0.9",
+        "@types/node": "^20.17.19",
+        "@types/vscode": "^1.93.0",
+        "@typescript-eslint/eslint-plugin": "^8.10.0",
+        "@typescript-eslint/parser": "^8.7.0",
+        "@vscode/test-cli": "^0.0.10",
+        "@vscode/test-electron": "^2.4.1",
+        "eslint": "^9.13.0",
+        "typescript": "^5.6.3"
+    },
+    "dependencies": {
+        "@pinecone-database/pinecone": "^4.0.0",
+        "dotenv": "^16.4.5",
+        "marked": "^15.0.11",
+        "openai": "^4.85.3",
+        "pinecone": "^0.1.0",
+        "vscode": "^1.1.37"
+    }
 }
